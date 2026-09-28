@@ -36,8 +36,8 @@ function database() {
     const values = [];
     return {
       bind(...bound) { values.push(...bound); return this; },
-      async first() { return (await query(convert(statement), values))[0] || null; },
-      async run() { await query(convert(statement), values); return { success: true }; }
+      async first() { return (await query.query(convert(statement), values))[0] || null; },
+      async run() { await query.query(convert(statement), values); return { success: true }; }
     };
   };
   return { prepare, batch: async (statements) => Promise.all(statements.map((statement) => statement.run())) };

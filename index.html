@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pequenos Sonhos 3D | Central</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color:#1b1730; background:#f7f5ff; } *{box-sizing:border-box} body{margin:0} main{width:min(720px,calc(100% - 32px));margin:0 auto;padding:32px 0 48px}.brand{display:flex;gap:12px;align-items:center;margin-bottom:18px}.mark{width:44px;height:44px;display:grid;place-items:center;border-radius:14px;background:#6c43b5;color:#fff;font-size:22px}h1{font-size:clamp(24px,5vw,34px);margin:0}p{line-height:1.5;color:#625a70}.card{background:#fff;border:1px solid #e5dff0;border-radius:18px;padding:22px;box-shadow:0 16px 38px #2d194d10;margin-top:16px}.hide{display:none}label{display:block;font-weight:700;margin:15px 0 6px}input,select,textarea{width:100%;padding:12px;border:1px solid #d8cfea;border-radius:10px;font:inherit}textarea{min-height:150px}button,.button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 14px;border:0;border-radius:10px;background:#6c43b5;color:white;font:inherit;font-weight:700;text-decoration:none;cursor:pointer}.secondary{background:#eee8f8;color:#493668}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}.status{padding:12px;border-radius:10px;background:#f1edfa;margin:14px 0}.message{margin-top:14px;padding:12px;border-radius:10px}.error{background:#fff0f2;color:#962237}.success{background:#ebfaf0;color:#146a3d}@media(max-width:500px){main{padding-top:18px}}
+  </style>
+</head>
+<body><main>
+  <div class="brand"><div class="mark">✦</div><div><h1>Pequenos Sonhos 3D</h1><p>Central de anúncios do Mercado Livre</p></div></div>
+  <section id="loading" class="card"><p>Carregando painel…</p></section>
+  <section id="needsDatabase" class="card hide"><h2>Central publicada</h2><p>Falta conectar o banco de dados seguro da Vercel antes de ativar o painel e a integração com o Mercado Livre.</p></section>
+  <section id="setup" class="card hide"><h2>Ativar central</h2><p>Informe a chave renovada somente aqui — ela não deve ser enviada pelo chat.</p><form id="setupForm"><label>Código de ativação<input name="setupCode" required></label><label>Crie uma senha do painel<input name="adminPassword" type="password" minlength="8" required></label><label>Chave secreta do Mercado Livre<input name="clientSecret" type="password" required></label><div class="actions"><button>Ativar</button></div></form><div id="setupMessage"></div></section>
+  <section id="login" class="card hide"><h2>Entrar</h2><form id="loginForm"><label>Senha<input name="password" type="password" required></label><div class="actions"><button>Entrar no painel</button></div></form><div id="loginMessage"></div></section>
+  <section id="dashboard" class="hide"><div class="card"><h2>Mercado Livre</h2><div id="connection" class="status">Verificando conexão…</div><div class="actions"><a id="connect" class="button" href="/api/connect">Conectar Mercado Livre</a><button id="logout" class="secondary" type="button">Sair</button></div></div><div class="card"><h2>Publicar enfeite natalino</h2><p>Enfeites fixos em impressão 3D: 10 a 12 cm, R$30 por unidade. Kit com 6 itens: R$159,90.</p><form id="listingForm"><label>Foto do produto<input name="photo" type="file" accept="image/jpeg,image/png,image/webp" required></label><label>Modelo individual<select name="model"><option value="">Escolha</option><option>Rena</option><option>Papai Noel</option><option>Boneco de Neve</option><option>Pinguim</option><option>Urso Polar</option></select></label><label><input name="kit" type="checkbox" value="sim" style="width:auto"> Publicar kit com 6 enfeites</label><label>Descrição<textarea name="description">Enfeite natalino decorativo produzido em impressão 3D.
+
+Tamanho aproximado: 10 a 12 cm.
+Produto fixo (não articulado).
+Produzido artesanalmente; podem existir leves marcas naturais da impressão 3D.
+A bandeja da foto não acompanha.</textarea></label><div class="actions"><button>Publicar anúncio</button></div></form><div id="listingMessage"></div></div></section>
+</main><script>
+const show=(id)=>document.getElementById(id).classList.remove('hide'); const hide=(id)=>document.getElementById(id).classList.add('hide');
+function message(id,text,ok=false){const el=document.getElementById(id);el.className='message '+(ok?'success':'error');el.textContent=text}
+async function request(path,options={}){const response=await fetch(path,options);const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.error||'Não foi possível concluir.');return body}
+async function load(){try{const status=await request('/api/status');hide('loading');if(!status.databaseConfigured)return show('needsDatabase');if(!status.setupComplete)return show('setup');if(!status.authenticated)return show('login');show('dashboard');document.getElementById('connection').textContent=status.connected?'Conectado ao Mercado Livre.':'Conecte sua conta antes de publicar.';document.getElementById('connect').classList.toggle('hide',status.connected)}catch(error){hide('loading');show('login');message('loginMessage',error.message)}}
+document.getElementById('setupForm').addEventListener('submit',async(e)=>{e.preventDefault();try{await request('/api/setup',{method:'POST',body:new FormData(e.currentTarget)});location.reload()}catch(error){message('setupMessage',error.message)}});
+document.getElementById('loginForm').addEventListener('submit',async(e)=>{e.preventDefault();try{await request('/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:new FormData(e.currentTarget).get('password')})});location.reload()}catch(error){message('loginMessage',error.message)}});
+document.getElementById('logout').addEventListener('click',async()=>{await request('/api/logout',{method:'POST'});location.reload()});
+document.getElementById('listingForm').addEventListener('submit',async(e)=>{e.preventDefault();try{const data=await request('/api/listings',{method:'POST',body:new FormData(e.currentTarget)});message('listingMessage',`Anúncio criado: ${data.id}`,true);if(data.permalink)document.getElementById('listingMessage').innerHTML+=` <a href="${data.permalink}" target="_blank" rel="noreferrer">Abrir anúncio</a>`}catch(error){message('listingMessage',error.message)}});
+load();
+</script></body></html>

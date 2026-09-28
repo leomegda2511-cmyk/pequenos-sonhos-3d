@@ -85,7 +85,7 @@ function productDescription(model, base) { return `${base}\n\nModelo: ${model}.\
 const defaultDescription = "Enfeite natalino decorativo produzido em impressão 3D.\n\nTamanho aproximado: 10 a 12 cm.\nProduto fixo (não articulado).\nProduzido artesanalmente; podem existir leves marcas naturais da impressão 3D.\nA bandeja da foto não acompanha.";
 
 export default async function handler(request, context) {
-  const path = `/api/${(context.params.path || []).join("/")}`.replace(/\/$/, "");
+  const path = new URL(request.url).pathname.replace(/\/$/, "");
   if (!process.env.DATABASE_URL) {
     if (path === "/api/status" && request.method === "GET") {
       return json({ setupComplete: false, authenticated: false, connected: false, databaseConfigured: false });

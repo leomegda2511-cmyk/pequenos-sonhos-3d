@@ -49,7 +49,8 @@ async function ensureSchema(db) {
     db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY NOT NULL, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY NOT NULL, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at)"),
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at)")
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS shopee_pending (session_hash TEXT PRIMARY KEY NOT NULL, expires_at TIMESTAMPTZ NOT NULL)")
   ]);
   await schemaReady;
 }
@@ -62,7 +63,7 @@ async function decrypt(value) { const [iv, encrypted] = String(value || "").spli
 async function passwordHash(password, salt) { const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]); const result = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: bytes(salt), iterations: 210000, hash: "SHA-256" }, material, 256); return base64Url(new Uint8Array(result)); }
 async function createSession(db) { const token = randomToken(); await db.prepare("INSERT INTO sessions (token_hash, expires_at, created_at) VALUES (?, ?, ?)").bind(await digest(`${process.env.APP_SESSION_KEY}:${token}`), future(sessionDays * 24 * 60), now()).run(); return token; }
 async function isAdmin(request, db) { const token = readCookies(request).ps3d_session; if (!token) return false; return Boolean(await db.prepare("SELECT token_hash FROM sessions WHERE token_hash = ? AND expires_at > ?").bind(await digest(`${process.env.APP_SESSION_KEY}:${token}`), now()).first()); }
-async function cleanup(db) { await db.batch([db.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(now()), db.prepare("DELETE FROM oauth_states WHERE expires_at <= ?").bind(now())]); }
+async function cleanup(db) { await db.batch([db.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(now()), db.prepare("DELETE FROM oauth_states WHERE expires_at <= ?").bind(now()), db.prepare("DELETE FROM shopee_pending WHERE expires_at <= ?").bind(now())]); }
 async function requireAdmin(request, db) { return (await isAdmin(request, db)) ? null : json({ error: "Entre no painel para continuar." }, 401); }
 
 async function mlToken(fields) {
@@ -84,11 +85,66 @@ function productTitle(model) { return `Enfeite Natalino 3D ${model} Decorativo 1
 function productDescription(model, base) { return `${base}\n\nModelo: ${model}.\nConteúdo: 1 unidade do modelo escolhido.`; }
 const defaultDescription = "Enfeite natalino decorativo produzido em impressão 3D.\n\nTamanho aproximado: 10 a 12 cm.\nProduto fixo (não articulado).\nProduzido artesanalmente; podem existir leves marcas naturais da impressão 3D.\nA bandeja da foto não acompanha.";
 
+const shopeeHost = "https://openplatform.shopee.com.br";
+function shopeeConfigured() {
+  return Boolean(/^\d+$/.test(process.env.SHOPEE_PARTNER_ID || "") && process.env.SHOPEE_PARTNER_KEY && process.env.SHOPEE_REDIRECT_URI);
+}
+async function shopeeSign(path, timestamp, token = "", shopId = "") {
+  const key = await crypto.subtle.importKey("raw", encoder.encode(process.env.SHOPEE_PARTNER_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const data = encoder.encode(`${process.env.SHOPEE_PARTNER_ID}${path}${timestamp}${token}${shopId}`);
+  return Array.from(new Uint8Array(await crypto.subtle.sign("HMAC", key, data)), x => x.toString(16).padStart(2, "0")).join("");
+}
+async function shopeeRequest(path, { method = "GET", body, params = {}, token = "", shopId = "" } = {}) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const url = new URL(path, shopeeHost);
+  url.search = new URLSearchParams({
+    partner_id: process.env.SHOPEE_PARTNER_ID, timestamp: String(timestamp),
+    sign: await shopeeSign(path, timestamp, token, shopId),
+    ...(token ? { access_token: token, shop_id: String(shopId) } : {}), ...params
+  }).toString();
+  const response = await fetch(url, { method, headers: { accept: "application/json", ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) throw new Error(`Shopee: ${data.message || data.error || "a solicitação falhou"}`);
+  return data;
+}
+async function saveShopeeTokens(db, data, shopId) {
+  if (!data.access_token || !data.refresh_token || !shopId) throw new Error("A Shopee não retornou os dados de autorização esperados.");
+  await configSet(db, [
+    ["shopee_access_token", await encrypt(data.access_token)],
+    ["shopee_refresh_token", await encrypt(data.refresh_token)],
+    ["shopee_shop_id", String(shopId)],
+    ["shopee_access_expires_at", new Date(Date.now() + Math.max(60, Number(data.expire_in || 14400) - 300) * 1000).toISOString()]
+  ]);
+}
+async function shopeeAccessToken(db) {
+  const current = await configGet(db, "shopee_access_token");
+  const expiry = await configGet(db, "shopee_access_expires_at");
+  if (current && expiry && Date.parse(expiry) > Date.now()) return decrypt(current);
+  const stored = await configGet(db, "shopee_refresh_token");
+  const shopId = await configGet(db, "shopee_shop_id");
+  if (!stored || !shopId) throw new Error("Conecte sua loja Shopee no painel.");
+  const data = await shopeeRequest("/api/v2/auth/access_token/get", {
+    method: "POST", body: { refresh_token: await decrypt(stored), shop_id: Number(shopId), partner_id: Number(process.env.SHOPEE_PARTNER_ID) }
+  });
+  await saveShopeeTokens(db, data, shopId);
+  return data.access_token;
+}
+async function shopeeOrders(db) {
+  const shopId = await configGet(db, "shopee_shop_id");
+  const token = await shopeeAccessToken(db);
+  const to = Math.floor(Date.now() / 1000);
+  const data = await shopeeRequest("/api/v2/order/get_order_list", {
+    token, shopId, params: { time_range_field: "update_time", time_from: String(to - 7 * 86400),
+      time_to: String(to), page_size: "50" }
+  });
+  return { orders: data.response?.order_list || [], more: Boolean(data.response?.more), cursor: data.response?.next_cursor || "" };
+}
+
 export default async function handler(request, context) {
   const path = new URL(request.url).pathname.replace(/\/$/, "");
   if (!process.env.DATABASE_URL) {
     if (path === "/api/status" && request.method === "GET") {
-      return json({ setupComplete: false, authenticated: false, connected: false, databaseConfigured: false });
+      return json({ setupComplete: false, authenticated: false, connected: false, databaseConfigured: false, shopeeConfigured: false, shopeeConnected: false });
     }
     return json({ error: "Conecte o banco de dados seguro antes de ativar a central." }, 503);
   }
@@ -96,7 +152,7 @@ export default async function handler(request, context) {
   await ensureSchema(db);
   try {
     if (path === "/api/mercadolivre/notificacoes") return json({ received: true });
-    if (path === "/api/status" && request.method === "GET") { const setupComplete = (await configGet(db, "setup_complete")) === "1"; const authenticated = setupComplete && await isAdmin(request, db); return json({ databaseConfigured: true, setupComplete, authenticated, connected: authenticated && Boolean(await configGet(db, "refresh_token")) }); }
+    if (path === "/api/status" && request.method === "GET") { const setupComplete = (await configGet(db, "setup_complete")) === "1"; const authenticated = setupComplete && await isAdmin(request, db); return json({ databaseConfigured: true, setupComplete, authenticated, connected: authenticated && Boolean(await configGet(db, "refresh_token")), shopeeConfigured: authenticated && shopeeConfigured(), shopeeConnected: authenticated && Boolean(await configGet(db, "shopee_refresh_token")) }); }
     if (path === "/api/setup" && request.method === "POST") {
       if (!sameOrigin(request)) return json({ error: "Origem não permitida." }, 403);
       if ((await configGet(db, "setup_complete")) === "1") return json({ error: "O painel já foi ativado." }, 409);
@@ -135,9 +191,47 @@ export default async function handler(request, context) {
       const descriptionText = isKit ? `${description}\n\nConteúdo do kit: 2 renas, Papai Noel, boneco de neve, pinguim e urso polar.` : productDescription(model, description);
       const created = await createItem(db, item, descriptionText); return json({ ok: true, id: created.id, permalink: created.permalink || "" });
     }
+    if (path === "/api/shopee/connect" && request.method === "GET") {
+      const denied = await requireAdmin(request, db); if (denied) return denied;
+      if (!shopeeConfigured()) return json({ error: "Configure a aplicação Shopee Open Platform na Vercel antes de conectar." }, 409);
+      if (new URL(process.env.SHOPEE_REDIRECT_URI).origin !== new URL(request.url).origin) return json({ error: "A URL de retorno da Shopee deve usar este mesmo domínio." }, 409);
+      const token = readCookies(request).ps3d_session;
+      const sessionHash = await digest(`${process.env.APP_SESSION_KEY}:${token}`);
+      await db.prepare("INSERT INTO shopee_pending (session_hash, expires_at) VALUES (?, ?) ON CONFLICT (session_hash) DO UPDATE SET expires_at = EXCLUDED.expires_at").bind(sessionHash, future(10)).run();
+      const path = "/api/v2/shop/auth_partner";
+      const timestamp = Math.floor(Date.now() / 1000);
+      const target = new URL(path, shopeeHost);
+      target.search = new URLSearchParams({ partner_id: process.env.SHOPEE_PARTNER_ID, timestamp: String(timestamp),
+        sign: await shopeeSign(path, timestamp), redirect: process.env.SHOPEE_REDIRECT_URI }).toString();
+      return Response.redirect(target, 302);
+    }
+    if (path === "/api/shopee/callback" && request.method === "GET") {
+      const denied = await requireAdmin(request, db); if (denied) return denied;
+      const token = readCookies(request).ps3d_session;
+      const sessionHash = await digest(`${process.env.APP_SESSION_KEY}:${token}`);
+      const pending = await db.prepare("SELECT session_hash FROM shopee_pending WHERE session_hash = ? AND expires_at > ?").bind(sessionHash, now()).first();
+      if (!pending) return json({ error: "Autorização da Shopee expirada. Inicie novamente pelo painel." }, 400);
+      const url = new URL(request.url);
+      const code = url.searchParams.get("code"), shopId = url.searchParams.get("shop_id");
+      if (!code || !/^\d+$/.test(shopId || "")) return json({ error: "Autorização da Shopee incompleta." }, 400);
+      const data = await shopeeRequest("/api/v2/auth/token/get", {
+        method: "POST", body: { code, shop_id: Number(shopId), partner_id: Number(process.env.SHOPEE_PARTNER_ID) }
+      });
+      await saveShopeeTokens(db, data, shopId);
+      await db.prepare("DELETE FROM shopee_pending WHERE session_hash = ?").bind(sessionHash).run();
+      return Response.redirect(new URL("/?shopee=conectada", request.url), 302);
+    }
+    if (path === "/api/shopee/orders" && request.method === "GET") {
+      const denied = await requireAdmin(request, db); if (denied) return denied;
+      if (!shopeeConfigured()) return json({ error: "Configure a aplicação Shopee Open Platform na Vercel." }, 409);
+      return json(await shopeeOrders(db));
+    }
     if (path === "/api/cron/marketplace-sync") {
       const authorization = request.headers.get("authorization"); if (authorization !== `Bearer ${process.env.CRON_SECRET}`) return json({ error: "Não autorizado." }, 401);
-      const connected = Boolean(await configGet(db, "refresh_token")); if (connected) await accessToken(db); await cleanup(db); return json({ ok: true, connected, checkedAt: now() });
+      const connected = Boolean(await configGet(db, "refresh_token")); if (connected) await accessToken(db);
+      const shopeeConnected = shopeeConfigured() && Boolean(await configGet(db, "shopee_refresh_token"));
+      if (shopeeConnected) await shopeeAccessToken(db);
+      await cleanup(db); return json({ ok: true, connected, shopeeConnected, checkedAt: now() });
     }
     return new Response("Não encontrado.", { status: 404, headers });
   } catch (error) { return json({ error: error?.message || "Ocorreu um erro inesperado." }, 500); }

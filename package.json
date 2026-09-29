@@ -8,6 +8,6 @@
     "@neondatabase/serverless": "^1.0.2"
   },
   "scripts": {
-    "check": "node --check api/[...path].js"
+    "check": "node --check api/[...path].js && node --test tests/shopee.test.cjs"
   }
 }

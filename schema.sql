@@ -16,5 +16,10 @@ CREATE TABLE IF NOT EXISTS oauth_states (
   created_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS shopee_pending (
+  session_hash TEXT PRIMARY KEY NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at);

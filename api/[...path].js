@@ -158,8 +158,12 @@ export default async function handler(request, context) {
       if ((await configGet(db, "setup_complete")) === "1") return json({ error: "O painel já foi ativado." }, 409);
       const form = await request.formData(); const code = String(form.get("setupCode") || ""); const password = String(form.get("adminPassword") || ""); const secret = String(form.get("clientSecret") || "");
       if (code !== process.env.APP_SETUP_CODE) return json({ error: "Código de ativação inválido." }, 403);
-      if (password.length < 8 || secret.length < 12) return json({ error: "Crie uma senha de 8 caracteres e informe a chave do Mercado Livre." }, 400);
-      const salt = randomToken(16); await configSet(db, [["admin_salt", salt], ["admin_hash", await passwordHash(password, salt)], ["client_secret", await encrypt(secret)], ["setup_complete", "1"]]);
+      if (password.length < 8) return json({ error: "Crie uma senha de pelo menos 8 caracteres." }, 400);
+      if (secret && secret.length < 12) return json({ error: "A chave do Mercado Livre, se informada, deve ter pelo menos 12 caracteres." }, 400);
+      const salt = randomToken(16);
+      const setupEntries = [["admin_salt", salt], ["admin_hash", await passwordHash(password, salt)], ["setup_complete", "1"]];
+      if (secret) setupEntries.push(["client_secret", await encrypt(secret)]);
+      await configSet(db, setupEntries);
       return json({ ok: true }, 200, { "set-cookie": appCookie(await createSession(db)) });
     }
     if (path === "/api/login" && request.method === "POST") {
